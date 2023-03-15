@@ -1,0 +1,16 @@
+{
+  "name": "blockchain-project",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node server/server.js"
+  },
+  "author": "Rahul Mahadevan",
+  "license": "ISC",
+  "dependencies": {
+    "bls-signatures": "^1.0.16",
+    "eccrypto": "^1.1.6",
+    "express": "^4.17.2"
+  }
+}
