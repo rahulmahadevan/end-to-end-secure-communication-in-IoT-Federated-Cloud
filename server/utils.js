@@ -7,12 +7,108 @@ const path = require('path');
 const difficulty = 2;
 const hrtime = process.hrtime;
 
+module.exports.isAuthenticated = (pubKey, port) => {
+	var transactions = JSON.parse(fs.readFileSync(dir+"/"+port+"/transactions.txt").toString())
+	if(transactions.includes(pubKey) || pubKey == 1){
+		return true;
+	}
+	return false;
+}
+
+module.exports.retrieveDataFromCloud = (userId, docId, port, start, resToDevice) => {
+	let url = 'http://localhost:'+5000+'/retrieve/'+encodeURIComponent(docId)+'/'+encodeURIComponent(userId);
+	console.log("Retrieving document from Cloud Storage");
+	http.get(url , (res) => {
+		let data = "";
+		res.on('data', (chunk) => {
+			data += chunk;
+		});
+
+		res.on('end', () => {
+			try{
+				const end = hrtime();
+			  const elapsedTimeInNanoseconds = (end[0] - start[0]) * 1e9 + (end[1] - start[1]);
+				const elapsedTimeInMilliseconds = elapsedTimeInNanoseconds / 1e6;
+				console.log("Document retrival from cloud storage is completed");
+				console.log(`Retrival time: ${elapsedTimeInMilliseconds} milliseconds\n`);
+				resToDevice.send({responseCode:200, doc: data.toString()});
+			}catch(err){
+				// console.log("Response error:"+err);
+			}
+		});
+	}).on('error', (err) => {
+		console.log("Error: "+err);
+		//PORTS NOT RUNNING WILL THROW ERROR
+	})
+}
+
+module.exports.sendDocumentChunks = (docId, doc, userId, port, start) => {
+	var peers = JSON.parse(fs.readFileSync(dir+"/activeClouds.txt").toString())
+	var count = peers.length;
+	var responses = 0;
+	for(let peer in peers){
+		let url = 'http://localhost:'+peers[peer]+'/uploadChunks/'+encodeURIComponent(userId)+'/'+encodeURIComponent(docId)+'/'+encodeURIComponent(doc);
+		console.log("Sending document chunk to Cloud Provider at: "+peers[peer]);
+		http.get(url , (res) => {
+			let data = "";
+			res.on('data', (chunk) => {
+				data += chunk;
+			});
+
+			res.on('end', () => {
+				responses = responses + 1;
+				try{
+					if(responses == peers.length-1){
+						const end = hrtime();
+					  const elapsedTimeInNanoseconds = (end[0] - start[0]) * 1e9 + (end[1] - start[1]);
+						const elapsedTimeInMilliseconds = elapsedTimeInNanoseconds / 1e6;
+						console.log("Secure document upload to cloud storage is completed");
+						console.log(`Document chunks is received by all Cloud Providers - Total Upload latency ${elapsedTimeInMilliseconds} milliseconds\n`);
+					}
+				}catch(err){
+					// console.log("Response error:"+err);
+				}
+			});
+		}).on('error', (err) => {
+			console.log("Error: "+err);
+			//PORTS NOT RUNNING WILL THROW ERROR
+		})
+	}
+}
+
+module.exports.uploadDocToCloud = (userId, port, doc, docId, start) => {
+	let url = 'http://localhost:'+5000+'/upload?docId='+encodeURIComponent(docId)+'&doc='+encodeURIComponent(doc)+'&fogId='+encodeURIComponent(port)+'&userId='+encodeURIComponent(userId);
+		console.log("Forwarding validated upload request from user:"+userId+" to Cloud Blockchain");
+		http.get(url , (res) => {
+			let data = "";
+			res.on('data', (chunk) => {
+				data += chunk;
+			});
+
+			res.on('end', () => {
+				try{
+					console.log(data);
+					var end = hrtime();
+				  var elapsedTimeInNanoseconds = (end[0] - start[0]) * 1e9 + (end[1] - start[1]);
+					var elapsedTimeInMilliseconds = elapsedTimeInNanoseconds / 1e6;
+					console.log(`Time taken to send document to Cloud Blockchain ${elapsedTimeInMilliseconds} milliseconds\n`);
+					
+				}catch(err){
+					// console.log("Response error:"+err);
+				}
+			});
+		}).on('error', (err) => {
+			console.log("Error: "+err);
+			//PORTS NOT RUNNING WILL THROW ERROR
+		})
+}
+
 module.exports.createBlock = (transactions, port, start, res) => {
 		var privateKey = JSON.parse(fs.readFileSync(dir+"/"+port+"/keys.txt").toString()).privateKey;
 		var publicKey = JSON.parse(fs.readFileSync(dir+"/"+port+"/keys.txt").toString()).publicKey;
 		var sign = signTransaction(transactions, privateKey);
 		var block = {
-		'type' : 'transaction',
+		'type' : 'registration',
 		'blockData' : JSON.parse(transactions),
 		'previousBlock' : getLastBlock(port),
 		'aggregateSign' : sign,
@@ -48,12 +144,13 @@ genLedgerFile = (pubKey, privKey, port) => {
 	console.log("Creating network files for node at port "+port);
 	fs.writeFileSync(dir + "/" + port + "/ledger.txt", JSON.stringify([block]));
 	fs.writeFileSync(dir + "/" + port + "/transactions.txt", "[]");
+	fs.writeFileSync(dir + "/" + port + "/transactionsMessages.txt", "[]");
 	console.log("ledger file created");
 	fs.writeFileSync(dir + "/" + port + "/balance.txt", "100");
 }
 
 
-module.exports.register = (id, timestamp, authToken, port) => {
+module.exports.register = (id, timestamp, authToken, port, start, res) => {
 		const hash = crypto.createHash('sha256')
 		// Read the contents of the JSON file
 		const deviceId = id
@@ -65,35 +162,105 @@ module.exports.register = (id, timestamp, authToken, port) => {
 		  return { success: false, message: 'Unauthorized Device - Not registered offline', deviceId: id}
 		}
 
+		var pubKey = "";
+		var privKey = "";
+		console.log("Creating ECC identity for new device");
+		generateKeyPair('ec', {
+	    namedCurve: 'secp256k1',
+	    publicKeyEncoding: {
+	      type: 'spki',
+	      format: 'pem'
+	    },
+	    privateKeyEncoding: {
+	      type: 'pkcs8',
+	      format: 'pem'
+	    }
+	  },
+		(err, publicKey, privateKey) => {
+			if(!err){
+				pubKey = publicKey.toString('hex');
+				privKey = privateKey.toString('hex');
+				var sampleMessage = "This-Is-A-Sample-Data";
+				var sampleSign = signTransaction(sampleMessage, privKey);
 
-		const algorithm = 'secp256k1';
-    
-    const curve = crypto.createECDH(algorithm);
-    const publicKey = curve.generateKeys();
-    const secretKey = curve.computeSecret(publicKey);
+		    var localRegistration = {
+		    	publicKey : pubKey,
+		    	privatekey: privKey,
+		    	sampleMessage : sampleMessage,
+		    	sign : sampleSign,
+		    	sampleTransaction: "/transact?publicKey="+publicKey+"&message="+sampleMessage+"&sign="+sampleSign
+		    }
 
-    const encryptionKey = crypto.randomBytes(32);
+		    fs.writeFileSync(dir+"/"+port+"/registrations.json", JSON.stringify(localRegistration));
 
-    var registration = {
-			pubKey: JSON.parse(fs.readFileSync(dir+"/"+port+"/keys.txt").toString()).publicKey,
-			data: {
-				devicePublicKey: publicKey,
-				sharedSecretKey: encryptionKey
+		    // console.log("SAMPLE MESSAGE TRANSACTION: "+ JSON.stringify(localRegistration));
+
+		    const encryptionKey = crypto.randomBytes(32);
+
+		    var registration = {
+					pubKey: JSON.parse(fs.readFileSync(dir+"/"+port+"/keys.txt").toString()).publicKey,
+					data: {
+						devicePublicKey: publicKey,
+						sharedSecretKey: encryptionKey
+					}
+				}
+
+				var transactions = JSON.parse(fs.readFileSync(dir+"/"+port+"/transactions.txt").toString())
+
+				transactions.push(registration);
+
+				//Registration message need not be sent to network - only send when aggregated
+
+				console.log(registration);
+
+				fs.writeFileSync(dir+"/"+port+"/transactions.txt", JSON.stringify(transactions));
+
+		    var respMsg = { 
+		    	success: true,
+		    	message: 'Device registered successfully',
+		    	deviceId: id, 
+		    	publicKey: pubKey, 
+		    	privateKey: privKey, 
+		    	encryptionKey: encryptionKey 
+		    };
+
+		    const end = hrtime();
+		    const elapsedTimeInNanoseconds = (end[0] - start[0]) * 1e9 + (end[1] - start[1]);
+				const elapsedTimeInMilliseconds = elapsedTimeInNanoseconds / 1e6;
+				console.log('Registration Successful')
+				console.log(`Registration time: ${elapsedTimeInMilliseconds} milliseconds\n`);
+		    res.send(respMsg);
+			}else{
+				console.log("Crypto error");
 			}
-		}
-
-		var transactions = JSON.parse(fs.readFileSync(dir+"/"+port+"/transactions.txt").toString())
-
-		transactions.push(registration);
-
-		//SEND TO ALL PEERS
-
-		console.log(registration);
-
-		fs.writeFileSync(dir+"/"+port+"/transactions.txt", JSON.stringify(transactions));
-
-    return { success: true, message: 'Device registered successfully', deviceId: id, publicKey: publicKey, privateKey: secretKey, encryptionKey: encryptionKey };
+		});
 };
+
+module.exports.makeTransactionRequest = (message, sign, publicKey, res) => {
+	res.send({
+		response: "Transaction sent to fog peer",
+		status: "success",
+		responseCode: 200
+	})
+	let url = 'http://localhost:3000/transact?message='+encodeURIComponent(message)+'&sign='+encodeURIComponent(sign)+'&publicKey='+encodeURIComponent(publicKey);
+		http.get(url , (res) => {
+			let data = "";
+			res.on('data', (chunk) => {
+				data += chunk;
+			});
+
+			res.on('end', () => {
+				try{
+					console.log(data);
+				}catch(err){
+					console.log("Response error:"+err);
+				}
+			});
+		}).on('error', (err) => {
+			// console.log("Error: "+err);
+			//PORTS NOT RUNNING WILL THROW ERROR
+		})
+}
 
 module.exports.createDS = (transaction, privateKey) => {
 	return signTransaction(transaction, privateKey);
@@ -153,6 +320,39 @@ module.exports.broadcastTransaction = (message, sign, publicKey, port, start, re
 	}
 }
 
+sendValidatedBlockToCloud = (block, port, start, res) => {
+	var responses = 0;
+	peers = [5000];
+	for(let peer in peers){
+		let url = 'http://localhost:'+peers[peer]+'/registerOnCloud/'+encodeURIComponent(JSON.stringify(block));
+		console.log("Sending latest ledger state to peer at: "+peers[peer]);
+		http.get(url , (res) => {
+			let data = "";
+			res.on('data', (chunk) => {
+				data += chunk;
+			});
+
+			res.on('end', () => {
+				responses = responses + 1;
+				try{
+					if(responses == peers.length){
+						const end = hrtime();
+					  const elapsedTimeInNanoseconds = (end[0] - start[0]) * 1e9 + (end[1] - start[1]);
+						const elapsedTimeInMilliseconds = elapsedTimeInNanoseconds / 1e6;
+						console.log(`End to End Registration Time: ${elapsedTimeInMilliseconds} milliseconds\n`);
+						res.send({destination: "cloud", status: "success"});
+					}
+				}catch(err){
+					// console.log("Response error:"+err);
+				}
+			});
+		}).on('error', (err) => {
+			console.log("Error: "+err);
+			//PORTS NOT RUNNING WILL THROW ERROR
+		})
+	}
+}
+
 publishValidatedLedger = (ledger, port, start, res) => {
 	var peers = JSON.parse(fs.readFileSync(dir+"/active.txt").toString());
 	var responses = 0;
@@ -172,8 +372,9 @@ publishValidatedLedger = (ledger, port, start, res) => {
 						const end = hrtime();
 					  const elapsedTimeInNanoseconds = (end[0] - start[0]) * 1e9 + (end[1] - start[1]);
 						const elapsedTimeInMilliseconds = elapsedTimeInNanoseconds / 1e6;
-						console.log(`Consensus reached in ${elapsedTimeInMilliseconds} milliseconds\n`);
+						console.log(`Consensus reached`);
 						console.log(`Ledger state updated\nBlock acceptance time: ${elapsedTimeInMilliseconds} milliseconds\n`);
+						//TODO: send R Block to Consortium blockchain
 						res.send(ledger);
 					}
 				}catch(err){
@@ -188,7 +389,12 @@ publishValidatedLedger = (ledger, port, start, res) => {
 }
 
 broadcastBlock = (block, port, start, res) => {
-	var peers = JSON.parse(fs.readFileSync(dir+"/active.txt").toString());
+	var peers = [];
+	if(port >= 3000 && port <= 3999){
+		peers = JSON.parse(fs.readFileSync(dir+"/active.txt").toString());
+	}else if(port >= 5000){
+		peers = JSON.parse(fs.readFileSync(dir+"/activeClouds.txt").toString());
+	}
 	var threshold = peers.length/2;
 	console.log(peers);
 	var validatorsList = [];
@@ -231,6 +437,10 @@ broadcastBlock = (block, port, start, res) => {
 							flag = true;
 							//SEND HTTP AGAIN TO ACCEPT BLOCK THEN LOG TIME THERE
 							publishValidatedLedger(ledger, port, start, res);
+							//SEND Registrations to Cloud
+							if(port >= 3000 && port <= 3999){
+								sendValidatedBlockToCloud(block, port, start, res);
+							}
 						}
 					}
 				}catch(err){
@@ -329,8 +539,7 @@ module.exports.genFiles = (res, port, start) => {
 			console.log("Creating genesis block...");
 			genLedgerFile(publicKey, privateKey, port);
 			console.log("Sending existance message to network...");
-			if(port != 3000)
-				contactPeers(port,publicKey, port);
+			contactPeers(port,publicKey, port);
 			const end = hrtime();
 	    const elapsedTimeInNanoseconds = (end[0] - start[0]) * 1e9 + (end[1] - start[1]);
 			const elapsedTimeInMilliseconds = elapsedTimeInNanoseconds / 1e6;
@@ -352,7 +561,13 @@ createHash = (data) => {
 
 contactPeers = (portNum, pubKey, port) => {
 	var nport = 3000;
-	let url = 'http://localhost:3000/exist';
+	if(port > 5000 && port <= 5999){
+		nport = 5000;
+	}
+	if(port == 3000 || port == 5000){
+		return;
+	}
+	let url = 'http://localhost:'+nport+'/exist';
 		http.get(url , (res) => {
 			let data = "";
 			res.on('data', (chunk) => {
@@ -366,7 +581,14 @@ contactPeers = (portNum, pubKey, port) => {
 			  	var ledger = response.ledger;
 			  	fs.writeFileSync(dir+"/"+port+"/transactions.txt", transactions.toString());
 			  	fs.writeFileSync(dir+"/"+port+"/ledger.txt", ledger.toString());
-			  	console.log("Updated network state\n");
+			  	var text = "";
+			  	if(nport == 3000){
+			  		text = "from Fog Private Blockchain";
+			  	}else{
+			  		text = "from Cloud Consortium Blockchain";
+			  	}
+			  	console.log("Updated network state "+text);
+
 				}catch(err){
 					console.log(err);
 					console.log("Response error");
